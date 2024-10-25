@@ -4,6 +4,7 @@ use rand::prelude::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::error::Error as StdError;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -20,48 +21,135 @@ pub enum SamplingMethod {
 
 impl Default for SamplingMethod {
     fn default() -> Self {
-        SamplingMethod::Ratio
+        SamplingMethod::Exponent
     }
 }
+
+#[derive(Debug)]
+struct ParseError {
+    line_number: usize,
+    message: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Line {}: {}", self.line_number, self.message)
+    }
+}
+
+impl StdError for ParseError {}
 
 #[derive(Debug)]
 pub struct ConfidenceEntry {
     pub predictability: f64,
     pub entropy: f64,
+    pub unlike_probabilities: Option<[f64; 4]>,
+    pub unlike_probability: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SmartIndices(pub Vec<Vec<usize>>);
 
 fn min_entropy(val: f64) -> f64 {
+    if val <= 0.0 || val >= 1.0 {
+        return 0.0;
+    }
     -val.log2().min(-(1.0 - val).log2())
+}
+
+fn min_entropy_pairs(probabilities: &[f64; 4]) -> f64 {
+    probabilities
+        .iter()
+        .filter(|&&p| p > 0.0 && p < 1.0)
+        .map(|&p| -p.log2())
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap_or(0.0)
 }
 
 pub struct ConfidenceReader;
 
 impl ConfidenceReader {
+    fn parse_float(s: &str, line_number: usize, field: &str) -> Result<f64, Box<dyn StdError>> {
+        s.parse::<f64>().map_err(|e| -> Box<dyn StdError> {
+            Box::new(ParseError {
+                line_number,
+                message: format!("Failed to parse {} '{}': {}", field, s, e),
+            })
+        })
+    }
+
     pub fn read_confidence_file<P: AsRef<Path>>(
         path: P,
-    ) -> Result<Vec<ConfidenceEntry>, Box<dyn std::error::Error>> {
-        let file = File::open(path)?;
+    ) -> Result<Vec<ConfidenceEntry>, Box<dyn StdError>> {
+        let file = File::open(&path)?;
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
+        let mut line_number = 0;
 
         for line in reader.lines() {
+            line_number += 1;
             let line = line?;
-            if line.starts_with("Hamming distance") {
+
+            if !line.starts_with("Hamming distance") {
+                continue;
+            }
+
+            if line.contains('(') {
+                let after_paren = line.split(')').nth(1).ok_or_else(|| {
+                    Box::new(ParseError {
+                        line_number,
+                        message: "Malformed line: no closing parenthesis".to_string(),
+                    })
+                })?;
+
+                let values: Vec<f64> = after_paren
+                    .split_whitespace()
+                    .map(|s| Self::parse_float(s, line_number, "probability"))
+                    .collect::<Result<Vec<f64>, _>>()?;
+
+                if values.len() < 8 {
+                    println!(
+                        "Warning: Skipping line {} - not enough values after parentheses",
+                        line_number
+                    );
+                    continue;
+                }
+
+                let like_probabilities = [values[0], values[1], values[2], values[3]];
+                let unlike_probabilities = [values[4], values[5], values[6], values[7]];
+
+                entries.push(ConfidenceEntry {
+                    predictability: like_probabilities[0],
+                    entropy: min_entropy_pairs(&unlike_probabilities),
+                    unlike_probabilities: Some(unlike_probabilities),
+                    unlike_probability: None,
+                });
+            } else if line.contains("Like/Unlike/Difference") {
                 let parts: Vec<&str> = line[42..].trim().split(' ').collect();
                 if parts.len() >= 4 {
-                    let predictability = 1.0 - parts[2].parse::<f64>()?;
-                    let entropy = parts[3].parse::<f64>()?;
+                    let like_prob = Self::parse_float(parts[1], line_number, "like probability")?;
+                    let unlike_prob =
+                        Self::parse_float(parts[2], line_number, "unlike probability")?;
+                    let entropy = Self::parse_float(parts[3], line_number, "entropy")?;
+
                     entries.push(ConfidenceEntry {
-                        predictability,
+                        predictability: like_prob,
                         entropy,
+                        unlike_probabilities: None,
+                        unlike_probability: Some(unlike_prob),
                     });
                 }
             }
         }
 
+        if entries.is_empty() {
+            return Err(Box::new(ParseError {
+                line_number: 0,
+                message: "No valid entries found in file".to_string(),
+            }));
+        }
+
+        println!("Successfully parsed {} entries", entries.len());
         Ok(entries)
     }
 }
@@ -100,16 +188,31 @@ impl SmartSampler {
             .enumerate()
             .map(|(idx, entry)| {
                 if self.bad_indices.contains(&idx) {
-                    0.0
-                } else {
-                    match method {
-                        SamplingMethod::Gaps | SamplingMethod::Ratio => {
-                            let entropy_factor = f64::max(entry.entropy, 1.0 - entry.entropy);
-                            (entry.predictability / entropy_factor).powf(alpha)
-                        }
-                        SamplingMethod::Like => entry.predictability.powf(alpha),
-                        SamplingMethod::Exponent => {
-                            let min_ent = min_entropy(1.0 - entry.predictability);
+                    println!("Excluding index {} from sampling", idx);
+                    return 0.0;
+                }
+
+                match method {
+                    SamplingMethod::Gaps | SamplingMethod::Ratio => {
+                        let entropy_factor = f64::max(entry.entropy, 1.0 - entry.entropy);
+                        (entry.predictability / entropy_factor).powf(alpha)
+                    }
+                    SamplingMethod::Like => entry.predictability.powf(alpha),
+                    SamplingMethod::Exponent => {
+                        let min_ent = match (&entry.unlike_probabilities, entry.unlike_probability)
+                        {
+                            (Some(unlike_probs), _) => min_entropy_pairs(unlike_probs),
+                            (_, Some(unlike_prob)) => min_entropy(unlike_prob),
+                            _ => 0.0,
+                        };
+
+                        if min_ent <= 0.0 {
+                            println!(
+                                "Warning: Zero entropy at index {}, setting weight to 0",
+                                idx
+                            );
+                            0.0
+                        } else {
                             entry.predictability.powf(alpha / min_ent)
                         }
                     }
@@ -127,24 +230,40 @@ impl SmartSampler {
         let dist = rand::distributions::WeightedIndex::new(weights)
             .map_err(|_| GenerationError("Failed to create weight distribution".to_string()))?;
 
-        let mut subset = Vec::with_capacity(size);
+        let mut positions = HashSet::new();
         let mut attempts = 0;
 
-        while subset.len() < size && attempts < 1_000_000 {
-            let index = dist.sample(&mut rng);
-            if !subset.contains(&index) && !bad_indices.contains(&index) {
-                subset.push(index);
+        while positions.len() < size && attempts < 1_000_000 {
+            let pair_index = dist.sample(&mut rng);
+
+            // Convert pair_index to actual position pair (i,j)
+            let i = pair_index / 1024;
+            let j = pair_index % 1024;
+
+            // Skip if either position is in bad_indices
+            if bad_indices.contains(&i) || bad_indices.contains(&j) {
+                attempts += 1;
+                continue;
             }
+
+            // Add both positions if they're not already included
+            if !positions.contains(&i) {
+                positions.insert(i);
+            }
+            if !positions.contains(&j) && positions.len() < size {
+                positions.insert(j);
+            }
+
             attempts += 1;
         }
 
-        if subset.len() != size {
+        if positions.len() != size {
             return Err(GenerationError(
                 "Failed to generate non-duplicating subset".to_string(),
             ));
         }
 
-        Ok(subset)
+        Ok(positions.into_iter().collect())
     }
 
     pub fn generate(
@@ -517,7 +636,7 @@ impl CorrelationAnalyzer {
 
                     writeln!(
                         writer,
-                        "Hamming distance, Like/Unlike/Difference (Pair {}, {}) {} {} {} {} {} {} {} {}",
+                        "Hamming distance, Like/Unlike/Difference ({}, {}) {} {} {} {} {} {} {} {}",
                         pairs[idx].0,
                         pairs[idx].1,
                         same_normalized[0],

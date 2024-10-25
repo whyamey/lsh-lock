@@ -94,7 +94,7 @@ impl AnalysisTool {
     pub fn calculate_class_based_fractional_hamming_mean_and_entropy(
         templates: &[Template],
         indices: &[Vec<usize>],
-    ) -> (f64, f64, Arc<Mutex<Vec<f64>>>) {
+    ) -> (f64, f64, f64, Arc<Mutex<Vec<f64>>>) {
         let total_indices = indices.len();
         let progress = Arc::new(AtomicUsize::new(0));
         let entropy_store = Arc::new(Mutex::new(vec![0.0; total_indices]));
@@ -178,9 +178,15 @@ impl AnalysisTool {
                 (acc.0 + diff_class_mean, acc.1 + entropy)
             });
 
+        let min_entropy = entropy_store
+            .lock()
+            .unwrap()
+            .iter()
+            .fold(f64::INFINITY, |a, &b| a.min(b));
+
         let avg_diff_class_mean = diff_class_mean_sum / total_indices as f64;
         let avg_entropy = entropy_sum / total_indices as f64;
 
-        (avg_diff_class_mean, avg_entropy, entropy_store)
+        (avg_diff_class_mean, avg_entropy, min_entropy, entropy_store)
     }
 }

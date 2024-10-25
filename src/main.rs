@@ -150,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let templates = TemplateReader::read_templates(&templates)?;
 
             println!("Calculating entropies for each subset:");
-            let (avg_diff_class_mean, avg_entropy, entropy_store) =
+            let (avg_diff_class_mean, avg_entropy, min_entropy, entropy_store) =
                 AnalysisTool::calculate_class_based_fractional_hamming_mean_and_entropy(
                     &templates,
                     selected_indices,
@@ -167,7 +167,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             println!("Average Different Class Mean: {}", avg_diff_class_mean);
-            println!("Average Entropy: {}", avg_entropy);
+            println!(
+                "Average Entropy: {}, Minimum Entropy: {}",
+                avg_entropy, min_entropy
+            );
         }
         Command::TAR {
             input,
