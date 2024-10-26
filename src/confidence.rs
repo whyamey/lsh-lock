@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SamplingMethod {
-    Gaps,     // pair[0]/max(pair[1], 1-pair[1]) ** alpha
     Like,     // pair[0] ** alpha
     Ratio,    // pair[0]/max(pair[1], 1-pair[1]) ** alpha
     Exponent, // pair[0] ** (alpha/min_entropy(1 - pair[1]))
@@ -42,7 +41,6 @@ impl StdError for ParseError {}
 #[derive(Debug)]
 pub struct ConfidenceEntry {
     pub predictability: f64,
-    pub entropy: f64,
     pub unlike_probabilities: Option<[f64; 4]>,
     pub unlike_probability: Option<f64>,
 }
@@ -120,7 +118,6 @@ impl ConfidenceReader {
 
                 entries.push(ConfidenceEntry {
                     predictability: like_probabilities[0],
-                    entropy: min_entropy_pairs(&unlike_probabilities),
                     unlike_probabilities: Some(unlike_probabilities),
                     unlike_probability: None,
                 });
@@ -130,11 +127,9 @@ impl ConfidenceReader {
                     let like_prob = Self::parse_float(parts[1], line_number, "like probability")?;
                     let unlike_prob =
                         Self::parse_float(parts[2], line_number, "unlike probability")?;
-                    let entropy = Self::parse_float(parts[3], line_number, "entropy")?;
 
                     entries.push(ConfidenceEntry {
                         predictability: like_prob,
-                        entropy,
                         unlike_probabilities: None,
                         unlike_probability: Some(unlike_prob),
                     });
@@ -193,8 +188,29 @@ impl SmartSampler {
                 }
 
                 match method {
-                    SamplingMethod::Gaps | SamplingMethod::Ratio => {
-                        let entropy_factor = f64::max(entry.entropy, 1.0 - entry.entropy);
+                    SamplingMethod::Ratio => {
+                        let entropy_factor = if let Some(unlike_probs) = &entry.unlike_probabilities
+                        {
+                            let max_unlike_sum = unlike_probs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, _)| {
+                                    let other_sum: f64 = unlike_probs
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|&(j, _)| j != i)
+                                        .map(|(_, &p)| p)
+                                        .sum();
+                                    other_sum
+                                })
+                                .fold(0.0, f64::max);
+                            max_unlike_sum
+                        } else if let Some(unlike_prob) = entry.unlike_probability {
+                            f64::max(unlike_prob, 1.0 - unlike_prob)
+                        } else {
+                            1.0
+                        };
+
                         (entry.predictability / entropy_factor).powf(alpha)
                     }
                     SamplingMethod::Like => entry.predictability.powf(alpha),
@@ -236,17 +252,14 @@ impl SmartSampler {
         while positions.len() < size && attempts < 1_000_000 {
             let pair_index = dist.sample(&mut rng);
 
-            // Convert pair_index to actual position pair (i,j)
             let i = pair_index / 1024;
             let j = pair_index % 1024;
 
-            // Skip if either position is in bad_indices
             if bad_indices.contains(&i) || bad_indices.contains(&j) {
                 attempts += 1;
                 continue;
             }
 
-            // Add both positions if they're not already included
             if !positions.contains(&i) {
                 positions.insert(i);
             }

@@ -84,7 +84,6 @@ enum Command {
 
 fn parse_sampling_method(method: Option<String>) -> SamplingMethod {
     match method.as_deref() {
-        Some("gaps") => SamplingMethod::Gaps,
         Some("like") => SamplingMethod::Like,
         Some("ratio") => SamplingMethod::Ratio,
         Some("exponent") => SamplingMethod::Exponent,
