@@ -117,7 +117,7 @@ impl ConfidenceReader {
                 let unlike_probabilities = [values[4], values[5], values[6], values[7]];
 
                 entries.push(ConfidenceEntry {
-                    predictability: like_probabilities[0],
+                    predictability: 1.0 - like_probabilities[0],
                     unlike_probabilities: Some(unlike_probabilities),
                     unlike_probability: None,
                 });
@@ -129,7 +129,7 @@ impl ConfidenceReader {
                         Self::parse_float(parts[2], line_number, "unlike probability")?;
 
                     entries.push(ConfidenceEntry {
-                        predictability: like_prob,
+                        predictability: 1.0 - like_prob,
                         unlike_probabilities: None,
                         unlike_probability: Some(unlike_prob),
                     });
@@ -652,7 +652,7 @@ impl CorrelationAnalyzer {
                         "Hamming distance, Like/Unlike/Difference ({}, {}) {} {} {} {} {} {} {} {}",
                         pairs[idx].0,
                         pairs[idx].1,
-                        same_normalized[0],
+                        1.0 - same_normalized[0],
                         same_normalized[1],
                         same_normalized[2],
                         same_normalized[3],
