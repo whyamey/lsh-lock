@@ -93,7 +93,7 @@ enum Command {
         input: String,
         #[structopt(short, long)]
         templates: String,
-        #[structopt(short = "n", long, default_value = "250000")]
+        #[structopt(short = "n", long, default_value = "1000")]
         count: usize,
     },
     #[structopt(name = "tar", about = "Find TAR/TPR of lockers.")]

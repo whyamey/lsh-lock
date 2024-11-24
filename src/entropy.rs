@@ -1,5 +1,6 @@
 use bincode;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simsimd::BinarySimilarity;
@@ -124,35 +125,34 @@ impl RandomIndicesGenerator {
     }
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct CosineLocker {
-    projection_vectors: Vec<Vec<f32>>, // k random unit vectors of dimension 1024
+    seeds: Vec<u64>,
 }
 
 impl CosineLocker {
     pub fn new(k: usize) -> Self {
         let mut rng = rand::thread_rng();
-        let projection_vectors = (0..k)
-            .map(|_| {
-                let mut v: Vec<f32> = (0..1024).map(|_| rng.gen_range(-1.0..1.0)).collect();
-                let norm = (v.iter().map(|x| x * x).sum::<f32>()).sqrt();
-                v.iter_mut().for_each(|x| *x /= norm);
-                v
-            })
-            .collect();
-
-        Self { projection_vectors }
+        let seeds: Vec<u64> = (0..k).map(|_| rng.gen()).collect();
+        Self { seeds }
     }
 
     pub fn hash(&self, embedding: &[f32]) -> Vec<u8> {
-        self.projection_vectors
+        self.seeds
             .iter()
-            .map(|proj| {
+            .map(|&seed| {
+                let mut rng = ChaCha8Rng::seed_from_u64(seed);
+                let mut proj: Vec<f32> = (0..1024).map(|_| rng.gen_range(-1.0..1.0)).collect();
+
+                let norm = (proj.iter().map(|x| x * x).sum::<f32>()).sqrt();
+                proj.iter_mut().for_each(|x| *x /= norm);
+
                 let projection = proj
                     .iter()
                     .zip(embedding.iter())
                     .map(|(p, e)| p * e)
                     .sum::<f32>();
+
                 if projection > 0.0 {
                     1u8
                 } else {
@@ -180,13 +180,10 @@ impl CosineLockerGenerator {
         let mut writer = BufWriter::new(file);
 
         bincode::serialize_into(&mut writer, &count)?;
-        bincode::serialize_into(&mut writer, &size)?;
 
         for i in 0..count {
             let locker = CosineLocker::new(size);
-            for vec in &locker.projection_vectors {
-                bincode::serialize_into(&mut writer, vec)?;
-            }
+            bincode::serialize_into(&mut writer, &locker.seeds)?;
 
             if (i + 1) % (count / 10).max(1) == 0 {
                 println!("Progress: {}%", ((i + 1) * 100) / count);
@@ -201,17 +198,11 @@ impl CosineLockerGenerator {
         let mut reader = BufReader::new(file);
 
         let count: usize = bincode::deserialize_from(&mut reader)?;
-        let size: usize = bincode::deserialize_from(&mut reader)?;
-
         let mut lockers = Vec::with_capacity(count);
 
         for _ in 0..count {
-            let mut projection_vectors = Vec::with_capacity(size);
-            for _ in 0..size {
-                let vec: Vec<f32> = bincode::deserialize_from(&mut reader)?;
-                projection_vectors.push(vec);
-            }
-            lockers.push(CosineLocker { projection_vectors });
+            let seeds: Vec<u64> = bincode::deserialize_from(&mut reader)?;
+            lockers.push(CosineLocker { seeds });
         }
 
         Ok(lockers)
@@ -400,7 +391,6 @@ impl AnalysisTool {
                 let entropy = degrees_freedom * min_entropy;
                 entropy_store.lock().unwrap()[locker_idx] = entropy;
 
-                // Update progress
                 let current_progress = progress.fetch_add(1, Ordering::SeqCst) + 1;
                 if current_progress % (total_lockers / 10) == 0 {
                     println!("Progress: {}%", (current_progress * 100) / total_lockers);
