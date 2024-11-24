@@ -1,4 +1,5 @@
 use bincode;
+use ndarray::Array2;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
@@ -146,31 +147,6 @@ impl CosineLocker {
                 let norm = (proj.iter().map(|x| x * x).sum::<f32>()).sqrt();
                 proj.iter_mut().for_each(|x| *x /= norm);
                 proj
-            })
-            .collect()
-    }
-
-    pub fn hash(&self, embedding: &[f32]) -> Vec<u8> {
-        self.seeds
-            .iter()
-            .map(|&seed| {
-                let mut rng = ChaCha8Rng::seed_from_u64(seed);
-                let mut proj: Vec<f32> = (0..1024).map(|_| rng.gen_range(-1.0..1.0)).collect();
-
-                let norm = (proj.iter().map(|x| x * x).sum::<f32>()).sqrt();
-                proj.iter_mut().for_each(|x| *x /= norm);
-
-                let projection = proj
-                    .iter()
-                    .zip(embedding.iter())
-                    .map(|(p, e)| p * e)
-                    .sum::<f32>();
-
-                if projection > 0.0 {
-                    1u8
-                } else {
-                    0u8
-                }
             })
             .collect()
     }
@@ -336,57 +312,63 @@ impl AnalysisTool {
         let total_lockers = lockers.len();
         let progress = Arc::new(AtomicUsize::new(0));
         let entropy_store = Arc::new(Mutex::new(vec![0.0; total_lockers]));
-        let template_count = templates.len();
 
-        let class_diff: Vec<Vec<bool>> = templates
-            .iter()
-            .map(|t1| templates.iter().map(|t2| t1.class != t2.class).collect())
-            .collect();
+        let template_matrix: Array2<f32> = Array2::from_shape_vec(
+            (templates.len(), templates[0].data.len()),
+            templates.iter().flat_map(|t| t.data.clone()).collect(),
+        )
+        .unwrap();
 
-        let template_hashes: Vec<Vec<Vec<u8>>> = templates
+        let class_pairs: Array2<bool> =
+            Array2::from_shape_fn((templates.len(), templates.len()), |(i, j)| {
+                templates[i].class != templates[j].class
+            });
+
+        let results: Vec<(f64, f64)> = lockers
             .par_iter()
-            .map(|template| {
-                lockers
-                    .iter()
-                    .map(|locker| locker.hash(&template.data))
-                    .collect()
-            })
-            .collect();
+            .enumerate()
+            .map(|(locker_idx, locker)| {
+                let proj_matrix = Array2::from_shape_vec(
+                    (template_matrix.ncols(), locker.seeds.len()),
+                    locker
+                        .get_projection_vectors()
+                        .into_iter()
+                        .flat_map(|v| v)
+                        .collect(),
+                )
+                .unwrap();
 
-        let results: Vec<(f64, f64)> = (0..total_lockers)
-            .into_par_iter()
-            .map(|locker_idx| {
-                let mut diff_class_sum = 0.0;
-                let mut diff_class_count = 0;
-                let mut variance_sum = 0.0;
+                let projections = template_matrix.dot(&proj_matrix);
+                let signs = projections.mapv(|x| x > 0.0);
 
-                for i in 0..template_count {
-                    for j in (i + 1)..template_count {
-                        if class_diff[i][j] {
-                            let distance = Self::calc_hamming(
-                                &template_hashes[i][locker_idx],
-                                &template_hashes[j][locker_idx],
-                            );
+                let mut diff_class_distances = Vec::new();
 
-                            let normalized_distance =
-                                distance / (template_hashes[i][locker_idx].len() as f64);
-                            diff_class_sum += normalized_distance;
-                            diff_class_count += 1;
-                            variance_sum += normalized_distance * normalized_distance;
+                for i in 0..templates.len() {
+                    for j in (i + 1)..templates.len() {
+                        if class_pairs[[i, j]] {
+                            let distance = signs
+                                .row(i)
+                                .iter()
+                                .zip(signs.row(j).iter())
+                                .filter(|(&a, &b)| a != b)
+                                .count() as f64
+                                / signs.ncols() as f64;
+                            diff_class_distances.push(distance);
                         }
                     }
                 }
 
-                let diff_class_mean = if diff_class_count > 0 {
-                    diff_class_sum / diff_class_count as f64
+                let diff_class_count = diff_class_distances.len();
+                let (diff_class_mean, variance) = if diff_class_count > 0 {
+                    let mean = diff_class_distances.iter().sum::<f64>() / diff_class_count as f64;
+                    let var = diff_class_distances
+                        .iter()
+                        .map(|&x| (x - mean) * (x - mean))
+                        .sum::<f64>()
+                        / diff_class_count as f64;
+                    (mean, var)
                 } else {
-                    0.0
-                };
-
-                let variance = if diff_class_count > 0 {
-                    (variance_sum / diff_class_count as f64) - diff_class_mean * diff_class_mean
-                } else {
-                    0.0
+                    (0.0, 0.0)
                 };
 
                 let degrees_freedom = if variance != 0.0 {
@@ -405,7 +387,7 @@ impl AnalysisTool {
                 entropy_store.lock().unwrap()[locker_idx] = entropy;
 
                 let current_progress = progress.fetch_add(1, Ordering::SeqCst) + 1;
-                if current_progress % (total_lockers / 10) == 0 {
+                if current_progress % (total_lockers / 10).max(1) == 0 {
                     println!("Progress: {}%", (current_progress * 100) / total_lockers);
                 }
 
@@ -413,7 +395,7 @@ impl AnalysisTool {
             })
             .collect();
 
-        let (diff_class_mean_sum, entropy_sum): (f64, f64) = results
+        let (diff_class_mean_sum, entropy_sum) = results
             .iter()
             .fold((0.0, 0.0), |acc, &(diff_class_mean, entropy)| {
                 (acc.0 + diff_class_mean, acc.1 + entropy)
@@ -425,9 +407,11 @@ impl AnalysisTool {
             .iter()
             .fold(f64::INFINITY, |a, &b| a.min(b));
 
-        let avg_diff_class_mean = diff_class_mean_sum / total_lockers as f64;
-        let avg_entropy = entropy_sum / total_lockers as f64;
-
-        (avg_diff_class_mean, avg_entropy, min_entropy, entropy_store)
+        (
+            diff_class_mean_sum / total_lockers as f64,
+            entropy_sum / total_lockers as f64,
+            min_entropy,
+            entropy_store,
+        )
     }
 }
