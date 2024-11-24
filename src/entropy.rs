@@ -137,6 +137,19 @@ impl CosineLocker {
         Self { seeds }
     }
 
+    pub fn get_projection_vectors(&self) -> Vec<Vec<f32>> {
+        self.seeds
+            .iter()
+            .map(|&seed| {
+                let mut rng = ChaCha8Rng::seed_from_u64(seed);
+                let mut proj: Vec<f32> = (0..1024).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                let norm = (proj.iter().map(|x| x * x).sum::<f32>()).sqrt();
+                proj.iter_mut().for_each(|x| *x /= norm);
+                proj
+            })
+            .collect()
+    }
+
     pub fn hash(&self, embedding: &[f32]) -> Vec<u8> {
         self.seeds
             .iter()

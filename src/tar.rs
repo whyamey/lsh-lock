@@ -1,4 +1,5 @@
 use crate::entropy::CosineLocker;
+use ndarray::{Array1, Array2};
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rayon::prelude::*;
@@ -8,6 +9,7 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 #[derive(Debug)]
 struct Template {
@@ -179,19 +181,31 @@ impl TARAnalyzer {
             .filter(|path| path.is_dir())
             .collect();
 
-        let mut total_successes = 0;
-        let mut total_comparisons = 0;
         let total_dirs = class_dirs.len();
+        let results = Arc::new(Mutex::new((0, 0)));
 
-        for class_dir in class_dirs {
-            let files: Vec<_> = fs::read_dir(class_dir)?
+        let projection_matrices: Vec<Array2<f32>> = lockers
+            .par_iter()
+            .map(|locker| {
+                let vectors = locker.get_projection_vectors();
+                Array2::from_shape_vec(
+                    (vectors.len(), vectors[0].len()),
+                    vectors.into_iter().flat_map(|v| v).collect(),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        class_dirs.into_par_iter().for_each(|class_dir| {
+            let files: Vec<_> = fs::read_dir(&class_dir)
+                .unwrap()
                 .filter_map(Result::ok)
                 .map(|entry| entry.path())
                 .filter(|path| path.is_file())
                 .collect();
 
             if files.len() < 2 {
-                continue;
+                return;
             }
 
             let templates: Vec<Vec<f32>> = files
@@ -199,30 +213,49 @@ impl TARAnalyzer {
                 .filter_map(|file| Self::read_single_template(file).ok())
                 .collect();
 
-            let all_hashes: Vec<Vec<Vec<u8>>> = templates
-                .par_iter()
-                .map(|template| lockers.iter().map(|locker| locker.hash(template)).collect())
+            let mut local_successes = 0;
+            let mut local_comparisons = 0;
+
+            let templates_array: Vec<Array1<f32>> = templates
+                .iter()
+                .map(|t| Array1::from_vec(t.clone()))
                 .collect();
 
             for i in 0..templates.len() {
                 for j in (i + 1)..templates.len() {
-                    total_comparisons += 1;
-                    if all_hashes[i]
-                        .iter()
-                        .zip(all_hashes[j].iter())
-                        .any(|(hash1, hash2)| hash1 == hash2)
-                    {
-                        total_successes += 1;
+                    local_comparisons += 1;
+                    let mut found_match = false;
+
+                    for proj_matrix in &projection_matrices {
+                        let proj1 = proj_matrix.dot(&templates_array[i]);
+                        let proj2 = proj_matrix.dot(&templates_array[j]);
+
+                        let signs1: Vec<bool> = proj1.iter().map(|&x| x > 0.0).collect();
+                        let signs2: Vec<bool> = proj2.iter().map(|&x| x > 0.0).collect();
+
+                        if signs1 == signs2 {
+                            found_match = true;
+                            break;
+                        }
+                    }
+
+                    if found_match {
+                        local_successes += 1;
                     }
                 }
             }
+
+            let mut results = results.lock().unwrap();
+            results.0 += local_successes;
+            results.1 += local_comparisons;
 
             let current_progress = progress.fetch_add(1, Ordering::SeqCst) + 1;
             if current_progress % (total_dirs / 10).max(1) == 0 {
                 println!("Progress: {}%", (current_progress * 100) / total_dirs);
             }
-        }
+        });
 
+        let (total_successes, total_comparisons) = *results.lock().unwrap();
         let tar = if total_comparisons > 0 {
             total_successes as f64 / total_comparisons as f64
         } else {
