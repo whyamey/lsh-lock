@@ -1,3 +1,4 @@
+use crate::entropy::CosineLocker;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rayon::prelude::*;
@@ -144,6 +145,83 @@ impl TARAnalyzer {
 
         let total_successes: usize = results.iter().map(|(success, _)| success).sum();
         let total_comparisons: usize = results.iter().map(|(_, comparisons)| comparisons).sum();
+
+        let tar = if total_comparisons > 0 {
+            total_successes as f64 / total_comparisons as f64
+        } else {
+            0.0
+        };
+
+        Ok((tar, total_successes, total_comparisons))
+    }
+
+    fn read_single_template<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<f32>> {
+        let mut content = String::new();
+        File::open(path)?.read_to_string(&mut content)?;
+
+        Ok(content
+            .trim_end_matches(',')
+            .split(',')
+            .filter_map(|s| s.parse::<f32>().ok())
+            .collect())
+    }
+
+    pub fn analyze_cosine_tar<P: AsRef<Path>>(
+        feature_directory: P,
+        lockers: &[CosineLocker],
+    ) -> std::io::Result<(f64, usize, usize)> {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let feature_directory = feature_directory.as_ref();
+
+        let class_dirs: Vec<_> = fs::read_dir(feature_directory)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+
+        let mut total_successes = 0;
+        let mut total_comparisons = 0;
+        let total_dirs = class_dirs.len();
+
+        for class_dir in class_dirs {
+            let files: Vec<_> = fs::read_dir(class_dir)?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file())
+                .collect();
+
+            if files.len() < 2 {
+                continue;
+            }
+
+            let templates: Vec<Vec<f32>> = files
+                .par_iter()
+                .filter_map(|file| Self::read_single_template(file).ok())
+                .collect();
+
+            let all_hashes: Vec<Vec<Vec<u8>>> = templates
+                .par_iter()
+                .map(|template| lockers.iter().map(|locker| locker.hash(template)).collect())
+                .collect();
+
+            for i in 0..templates.len() {
+                for j in (i + 1)..templates.len() {
+                    total_comparisons += 1;
+                    if all_hashes[i]
+                        .iter()
+                        .zip(all_hashes[j].iter())
+                        .any(|(hash1, hash2)| hash1 == hash2)
+                    {
+                        total_successes += 1;
+                    }
+                }
+            }
+
+            let current_progress = progress.fetch_add(1, Ordering::SeqCst) + 1;
+            if current_progress % (total_dirs / 10).max(1) == 0 {
+                println!("Progress: {}%", (current_progress * 100) / total_dirs);
+            }
+        }
 
         let tar = if total_comparisons > 0 {
             total_successes as f64 / total_comparisons as f64

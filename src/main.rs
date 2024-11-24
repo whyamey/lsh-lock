@@ -4,7 +4,10 @@ mod tar;
 mod types;
 
 use confidence::{CorrelationAnalyzer, SamplingMethod, SmartSampler};
-use entropy::{AnalysisTool, RandomIndicesGenerator, TemplateReader};
+use entropy::{
+    AnalysisTool, CosineLockerGenerator, FloatTemplateReader, RandomIndicesGenerator,
+    TemplateReader,
+};
 use std::sync::Arc;
 use structopt::StructOpt;
 use tar::TARAnalyzer;
@@ -71,8 +74,39 @@ enum Command {
         #[structopt(short = "n", long, default_value = "1000")]
         count: usize,
     },
+    #[structopt(
+        name = "cosine-generate",
+        about = "Generate random projection LSH lockers"
+    )]
+    CosineGenerate {
+        #[structopt(short, long)]
+        output: String,
+        #[structopt(short, long, default_value = "250000")]
+        count: usize,
+        #[structopt(short, long, default_value = "60")]
+        size: usize,
+    },
+
+    #[structopt(name = "analyze-cosine", about = "Analyze entropy using cosine LSH")]
+    AnalyzeCosine {
+        #[structopt(short, long)]
+        input: String,
+        #[structopt(short, long)]
+        templates: String,
+        #[structopt(short = "n", long, default_value = "250000")]
+        count: usize,
+    },
     #[structopt(name = "tar", about = "Find TAR/TPR of lockers.")]
     TAR {
+        #[structopt(short, long)]
+        input: String,
+        #[structopt(short, long)]
+        templates: String,
+        #[structopt(short = "n", long, default_value = "250000")]
+        count: usize,
+    },
+    #[structopt(name = "tar-cosine", about = "Find TAR of cosine LSH lockers.")]
+    TARCosine {
         #[structopt(short, long)]
         input: String,
         #[structopt(short, long)]
@@ -171,6 +205,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 avg_entropy, min_entropy
             );
         }
+        Command::CosineGenerate {
+            output,
+            count,
+            size,
+        } => {
+            println!("Generating {} cosine LSH lockers of size {}", count, size);
+            CosineLockerGenerator::generate_and_store(&output, count, size)?;
+        }
+        Command::AnalyzeCosine {
+            input,
+            templates,
+            count,
+        } => {
+            println!("Loading cosine lockers from {}", input);
+            let lockers = CosineLockerGenerator::load(&input)?;
+            let lockers = &lockers[0..count];
+
+            println!("Loading float templates from {}", templates);
+            let templates = FloatTemplateReader::read_templates(&templates)?;
+
+            println!("Calculating cosine LSH entropies:");
+            let (avg_diff_class_mean, avg_entropy, min_entropy, entropy_store) =
+                AnalysisTool::calculate_cosine_entropy(&templates, &lockers);
+
+            let unwrap_entropy = Arc::try_unwrap(entropy_store)
+                .unwrap()
+                .into_inner()
+                .unwrap();
+
+            println!("\nSummary:");
+            println!("Average Different Class Mean: {}", avg_diff_class_mean);
+            println!("Average Entropy: {}", avg_entropy);
+            println!("Minimum Entropy: {}", min_entropy);
+
+            println!("\nDetailed entropy by locker (first 10):");
+            for (index, entropy) in unwrap_entropy.iter().enumerate().take(10) {
+                println!("Locker {}: {}", index, entropy);
+            }
+        }
         Command::TAR {
             input,
             templates,
@@ -182,6 +255,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Calculating True Accept Rate (TAR)...");
             let (tar, total_successes, total_comparisons) =
                 TARAnalyzer::analyze_tar(&templates, selected_indices)?;
+
+            println!("\nResults:");
+            println!("True Accept Rate (TAR): {:.4}", tar);
+            println!("Total Successes: {}", total_successes);
+            println!("Total Comparisons: {}", total_comparisons);
+        }
+        Command::TARCosine {
+            input,
+            templates,
+            count,
+        } => {
+            println!("Loading cosine lockers from {}", input);
+            let lockers = CosineLockerGenerator::load(&input)?;
+            let lockers = &lockers[0..count];
+
+            println!("Calculating True Accept Rate (TAR)...");
+            let (tar, total_successes, total_comparisons) =
+                TARAnalyzer::analyze_cosine_tar(&templates, lockers)?;
 
             println!("\nResults:");
             println!("True Accept Rate (TAR): {:.4}", tar);

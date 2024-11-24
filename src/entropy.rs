@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simsimd::BinarySimilarity;
 use std::fs::{self, File};
-use std::io::{BufWriter, Read};
+use std::io::{BufReader, BufWriter, Read};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -53,6 +53,47 @@ impl TemplateReader {
     }
 }
 
+#[derive(Debug)]
+pub struct FloatTemplate {
+    pub class: String,
+    pub data: Vec<f32>,
+}
+
+pub struct FloatTemplateReader;
+
+impl FloatTemplateReader {
+    pub fn read_templates(
+        embeddings_path: &str,
+    ) -> Result<Vec<FloatTemplate>, Box<dyn std::error::Error>> {
+        let mut templates = Vec::new();
+        for entry in fs::read_dir(embeddings_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                let class = path.file_name().unwrap().to_str().unwrap().to_string();
+                for file_entry in fs::read_dir(path)? {
+                    let file_entry = file_entry?;
+                    let file_path = file_entry.path();
+                    if file_path.is_file() {
+                        let mut content = String::new();
+                        File::open(&file_path)?.read_to_string(&mut content)?;
+                        let data: Vec<f32> = content
+                            .trim_end_matches(',')
+                            .split(',')
+                            .map(|s| s.parse::<f32>().unwrap())
+                            .collect();
+                        templates.push(FloatTemplate {
+                            class: class.clone(),
+                            data,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(templates)
+    }
+}
+
 pub struct RandomIndicesGenerator;
 
 impl RandomIndicesGenerator {
@@ -80,6 +121,100 @@ impl RandomIndicesGenerator {
         let file = File::open(file_path)?;
         let random_indices: RandomIndices = bincode::deserialize_from(file)?;
         Ok(random_indices)
+    }
+}
+
+#[derive(Debug)]
+pub struct CosineLocker {
+    projection_vectors: Vec<Vec<f32>>, // k random unit vectors of dimension 1024
+}
+
+impl CosineLocker {
+    pub fn new(k: usize) -> Self {
+        let mut rng = rand::thread_rng();
+        let projection_vectors = (0..k)
+            .map(|_| {
+                let mut v: Vec<f32> = (0..1024).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                let norm = (v.iter().map(|x| x * x).sum::<f32>()).sqrt();
+                v.iter_mut().for_each(|x| *x /= norm);
+                v
+            })
+            .collect();
+
+        Self { projection_vectors }
+    }
+
+    pub fn hash(&self, embedding: &[f32]) -> Vec<u8> {
+        self.projection_vectors
+            .iter()
+            .map(|proj| {
+                let projection = proj
+                    .iter()
+                    .zip(embedding.iter())
+                    .map(|(p, e)| p * e)
+                    .sum::<f32>();
+                if projection > 0.0 {
+                    1u8
+                } else {
+                    0u8
+                }
+            })
+            .collect()
+    }
+}
+
+pub struct CosineLockerGenerator;
+
+impl CosineLockerGenerator {
+    pub fn generate_and_store(
+        file_path: &str,
+        count: usize,
+        size: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        println!(
+            "Generating {} lockers with {} projections each...",
+            count, size
+        );
+
+        let file = File::create(file_path)?;
+        let mut writer = BufWriter::new(file);
+
+        bincode::serialize_into(&mut writer, &count)?;
+        bincode::serialize_into(&mut writer, &size)?;
+
+        for i in 0..count {
+            let locker = CosineLocker::new(size);
+            for vec in &locker.projection_vectors {
+                bincode::serialize_into(&mut writer, vec)?;
+            }
+
+            if (i + 1) % (count / 10).max(1) == 0 {
+                println!("Progress: {}%", ((i + 1) * 100) / count);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn load(file_path: &str) -> Result<Vec<CosineLocker>, Box<dyn std::error::Error>> {
+        let file = File::open(file_path)?;
+        let mut reader = BufReader::new(file);
+
+        let count: usize = bincode::deserialize_from(&mut reader)?;
+        let size: usize = bincode::deserialize_from(&mut reader)?;
+
+        let mut lockers = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            let mut projection_vectors = Vec::with_capacity(size);
+            for _ in 0..size {
+                let vec: Vec<f32> = bincode::deserialize_from(&mut reader)?;
+                projection_vectors.push(vec);
+            }
+            lockers.push(CosineLocker { projection_vectors });
+        }
+
+        Ok(lockers)
     }
 }
 
@@ -186,6 +321,109 @@ impl AnalysisTool {
 
         let avg_diff_class_mean = diff_class_mean_sum / total_indices as f64;
         let avg_entropy = entropy_sum / total_indices as f64;
+
+        (avg_diff_class_mean, avg_entropy, min_entropy, entropy_store)
+    }
+
+    pub fn calculate_cosine_entropy(
+        templates: &[FloatTemplate],
+        lockers: &[CosineLocker],
+    ) -> (f64, f64, f64, Arc<Mutex<Vec<f64>>>) {
+        let total_lockers = lockers.len();
+        let progress = Arc::new(AtomicUsize::new(0));
+        let entropy_store = Arc::new(Mutex::new(vec![0.0; total_lockers]));
+        let template_count = templates.len();
+
+        let class_diff: Vec<Vec<bool>> = templates
+            .iter()
+            .map(|t1| templates.iter().map(|t2| t1.class != t2.class).collect())
+            .collect();
+
+        let template_hashes: Vec<Vec<Vec<u8>>> = templates
+            .par_iter()
+            .map(|template| {
+                lockers
+                    .iter()
+                    .map(|locker| locker.hash(&template.data))
+                    .collect()
+            })
+            .collect();
+
+        let results: Vec<(f64, f64)> = (0..total_lockers)
+            .into_par_iter()
+            .map(|locker_idx| {
+                let mut diff_class_sum = 0.0;
+                let mut diff_class_count = 0;
+                let mut variance_sum = 0.0;
+
+                for i in 0..template_count {
+                    for j in (i + 1)..template_count {
+                        if class_diff[i][j] {
+                            let distance = Self::calc_hamming(
+                                &template_hashes[i][locker_idx],
+                                &template_hashes[j][locker_idx],
+                            );
+
+                            let normalized_distance =
+                                distance / (template_hashes[i][locker_idx].len() as f64);
+                            diff_class_sum += normalized_distance;
+                            diff_class_count += 1;
+                            variance_sum += normalized_distance * normalized_distance;
+                        }
+                    }
+                }
+
+                let diff_class_mean = if diff_class_count > 0 {
+                    diff_class_sum / diff_class_count as f64
+                } else {
+                    0.0
+                };
+
+                let variance = if diff_class_count > 0 {
+                    (variance_sum / diff_class_count as f64) - diff_class_mean * diff_class_mean
+                } else {
+                    0.0
+                };
+
+                let degrees_freedom = if variance != 0.0 {
+                    (diff_class_mean * (1.0 - diff_class_mean)) / variance
+                } else {
+                    0.0
+                };
+
+                let min_entropy = if diff_class_mean > 0.0 && diff_class_mean < 1.0 {
+                    f64::min(-diff_class_mean.log2(), -(1.0 - diff_class_mean).log2())
+                } else {
+                    0.0
+                };
+
+                let entropy = degrees_freedom * min_entropy;
+                entropy_store.lock().unwrap()[locker_idx] = entropy;
+
+                // Update progress
+                let current_progress = progress.fetch_add(1, Ordering::SeqCst) + 1;
+                if current_progress % (total_lockers / 10) == 0 {
+                    println!("Progress: {}%", (current_progress * 100) / total_lockers);
+                }
+
+                (diff_class_mean, entropy)
+            })
+            .collect();
+
+        let (diff_class_mean_sum, entropy_sum): (f64, f64) = results
+            .iter()
+            .fold((0.0, 0.0), |acc, &(diff_class_mean, entropy)| {
+                (acc.0 + diff_class_mean, acc.1 + entropy)
+            });
+
+        let min_entropy = entropy_store
+            .lock()
+            .unwrap()
+            .iter()
+            .fold(f64::INFINITY, |a, &b| a.min(b));
+
+        let avg_diff_class_mean = diff_class_mean_sum / total_lockers as f64;
+        let avg_entropy = entropy_sum / total_lockers as f64;
 
         (avg_diff_class_mean, avg_entropy, min_entropy, entropy_store)
     }
