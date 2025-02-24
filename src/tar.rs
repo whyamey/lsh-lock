@@ -172,7 +172,7 @@ impl TARAnalyzer {
         class_path: P,
         positions: &[Vec<usize>],
         tries: usize,
-    ) -> std::io::Result<Option<bool>> {
+    ) -> std::io::Result<Option<(usize, usize)>> {
         let class_path = class_path.as_ref();
         let files: Vec<_> = fs::read_dir(class_path)?
             .filter_map(Result::ok)
@@ -180,39 +180,35 @@ impl TARAnalyzer {
             .filter(|path| path.is_file())
             .collect();
 
-        if files.len() < tries + 1 {
+        if files.len() < tries {
             return Ok(None);
         }
 
-        let mut rng = rand::thread_rng();
+        let files = files.into_iter().take(tries).collect::<Vec<_>>();
 
-        let selected_files: Vec<_> = files
-            .choose_multiple(&mut rng, tries + 1)
-            .cloned()
-            .collect();
-
-        let templates: Vec<Template> = selected_files
+        let templates: Vec<Template> = files
             .par_iter()
             .filter_map(|file| Self::parse_binary_file(file).ok())
             .collect();
 
-        if templates.len() < tries + 1 {
+        if templates.is_empty() {
             return Ok(None);
         }
 
         let all_permutations = Self::create_permutations_batch(&templates, positions);
-        let base_permutations = &all_permutations[0];
 
-        let found_match =
-            all_permutations
-                .par_iter()
-                .skip(1)
-                .take(tries)
-                .any(|target_permutations| {
-                    Self::compare_permutations(base_permutations, target_permutations)
-                });
+        let base_idx = rand::thread_rng().gen_range(0..templates.len());
+        let base_permutations = &all_permutations[base_idx];
 
-        Ok(Some(found_match))
+        let found_match = all_permutations
+            .par_iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != base_idx)
+            .any(|(_, target_permutations)| {
+                Self::compare_permutations(base_permutations, target_permutations)
+            });
+
+        Ok(Some(if found_match { (1, 1) } else { (0, 1) }))
     }
 
     pub fn analyze_tar_multi<P: AsRef<Path>>(
@@ -231,32 +227,29 @@ impl TARAnalyzer {
 
         let total_dirs = class_dirs.len();
 
-        let results: Vec<Option<bool>> = class_dirs
+        let results: Vec<(usize, usize)> = class_dirs
             .par_iter()
-            .map(|class_path| {
-                let result =
-                    Self::process_single_class_multi(class_path, positions, tries).unwrap_or(None);
-
+            .filter_map(|class_path| {
+                Self::process_single_class_multi(class_path, positions, tries).unwrap_or(None)
+            })
+            .inspect(|_| {
                 let current_progress = progress.fetch_add(1, Ordering::SeqCst) + 1;
                 if current_progress % (total_dirs / 10).max(1) == 0 {
                     println!("Progress: {}%", (current_progress * 100) / total_dirs);
                 }
-
-                result
             })
             .collect();
 
-        let valid_results: Vec<bool> = results.into_iter().filter_map(|x| x).collect();
-        let total_classes = valid_results.len();
-        let successful_classes = valid_results.iter().filter(|&&x| x).count();
+        let classes_passed: usize = results.iter().map(|(success, _)| success).sum();
+        let total_classes = results.len();
 
         let tar = if total_classes > 0 {
-            successful_classes as f64 / total_classes as f64
+            classes_passed as f64 / total_classes as f64
         } else {
             0.0
         };
 
-        Ok((tar, successful_classes, total_classes))
+        Ok((tar, classes_passed, total_classes))
     }
 
     pub fn analyze_cosine_tar<P: AsRef<Path>>(
