@@ -33,6 +33,8 @@ enum Command {
         count: usize,
         #[structopt(short, long, default_value = "80")]
         size: usize,
+        #[structopt(short, long, default_value = "1024")]
+        dimensions: usize,
     },
     #[structopt(name = "zeta-sampling", about = "Generate lockers wrt zeta.")]
     ZetaSampling {
@@ -50,6 +52,8 @@ enum Command {
         method: Option<String>,
         #[structopt(long = "bad-indices", use_delimiter = true)]
         bad_indices: Option<Vec<usize>>,
+        #[structopt(short, long, default_value = "1024")]
+        dimensions: usize,
     },
     #[structopt(
         name = "correlate",
@@ -64,6 +68,8 @@ enum Command {
         num_files: usize,
         #[structopt(short, long, default_value = "single")]
         mode: AnalysisMode,
+        #[structopt(short, long, default_value = "1024")]
+        dimensions: usize,
     },
     #[structopt(name = "analyze", about = "Analyze the entropy of lockers.")]
     Analyze {
@@ -114,6 +120,20 @@ enum Command {
         #[structopt(short = "n", long, default_value = "250000")]
         count: usize,
     },
+    #[structopt(
+        name = "tar-multi",
+        about = "Find TAR with multiple template matching attempts"
+    )]
+    TARMulti {
+        #[structopt(short, long)]
+        input: String,
+        #[structopt(short, long)]
+        templates: String,
+        #[structopt(short = "n", long, default_value = "250000")]
+        count: usize,
+        #[structopt(short = "t", long, default_value = "10")]
+        tries: usize,
+    },
 }
 
 fn parse_sampling_method(method: Option<String>) -> SamplingMethod {
@@ -140,8 +160,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             count,
             size,
+            dimensions,
         } => {
-            RandomIndicesGenerator::generate_and_store(&output, count, size)?;
+            RandomIndicesGenerator::generate_and_store(&output, count, size, dimensions)?;
         }
         Command::ZetaSampling {
             output,
@@ -151,6 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             alpha,
             method,
             bad_indices,
+            dimensions,
         } => {
             let sampling_method = parse_sampling_method(method);
             SmartSampler::generate_and_store(
@@ -161,6 +183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 alpha,
                 sampling_method,
                 bad_indices,
+                dimensions,
             )?;
         }
         Command::Correlate {
@@ -168,8 +191,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             num_files,
             mode,
+            dimensions,
         } => {
-            let analyzer = CorrelationAnalyzer::new(&input, num_files);
+            let analyzer = CorrelationAnalyzer::new(&input, num_files, dimensions);
             analyzer.generate_correlation_report(&output, mode)?;
         }
         Command::Analyze {
@@ -278,6 +302,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("True Accept Rate (TAR): {:.4}", tar);
             println!("Total Successes: {}", total_successes);
             println!("Total Comparisons: {}", total_comparisons);
+        }
+        Command::TARMulti {
+            input,
+            templates,
+            count,
+            tries,
+        } => {
+            let random_indices = RandomIndicesGenerator::load(&input)?;
+            let selected_indices = &random_indices.0[0..count];
+
+            println!("Calculating Multi-Template True Accept Rate (TAR)...");
+            let (tar, successful_classes, total_classes) =
+                TARAnalyzer::analyze_tar_multi(&templates, selected_indices, tries)?;
+
+            println!("\nResults:");
+            println!("True Accept Rate (TAR): {:.4}", tar);
+            println!("Successful Classes: {}", successful_classes);
+            println!("Total Classes: {}", total_classes);
         }
     }
 

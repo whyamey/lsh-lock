@@ -168,6 +168,97 @@ impl TARAnalyzer {
             .collect())
     }
 
+    fn process_single_class_multi<P: AsRef<Path>>(
+        class_path: P,
+        positions: &[Vec<usize>],
+        tries: usize,
+    ) -> std::io::Result<Option<bool>> {
+        let class_path = class_path.as_ref();
+        let files: Vec<_> = fs::read_dir(class_path)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect();
+
+        if files.len() < tries + 1 {
+            return Ok(None);
+        }
+
+        let mut rng = rand::thread_rng();
+
+        let selected_files: Vec<_> = files
+            .choose_multiple(&mut rng, tries + 1)
+            .cloned()
+            .collect();
+
+        let templates: Vec<Template> = selected_files
+            .par_iter()
+            .filter_map(|file| Self::parse_binary_file(file).ok())
+            .collect();
+
+        if templates.len() < tries + 1 {
+            return Ok(None);
+        }
+
+        let all_permutations = Self::create_permutations_batch(&templates, positions);
+        let base_permutations = &all_permutations[0];
+
+        let found_match =
+            all_permutations
+                .par_iter()
+                .skip(1)
+                .take(tries)
+                .any(|target_permutations| {
+                    Self::compare_permutations(base_permutations, target_permutations)
+                });
+
+        Ok(Some(found_match))
+    }
+
+    pub fn analyze_tar_multi<P: AsRef<Path>>(
+        feature_directory: P,
+        positions: &[Vec<usize>],
+        tries: usize,
+    ) -> std::io::Result<(f64, usize, usize)> {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let feature_directory = feature_directory.as_ref();
+
+        let class_dirs: Vec<_> = fs::read_dir(feature_directory)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+
+        let total_dirs = class_dirs.len();
+
+        let results: Vec<Option<bool>> = class_dirs
+            .par_iter()
+            .map(|class_path| {
+                let result =
+                    Self::process_single_class_multi(class_path, positions, tries).unwrap_or(None);
+
+                let current_progress = progress.fetch_add(1, Ordering::SeqCst) + 1;
+                if current_progress % (total_dirs / 10).max(1) == 0 {
+                    println!("Progress: {}%", (current_progress * 100) / total_dirs);
+                }
+
+                result
+            })
+            .collect();
+
+        let valid_results: Vec<bool> = results.into_iter().filter_map(|x| x).collect();
+        let total_classes = valid_results.len();
+        let successful_classes = valid_results.iter().filter(|&&x| x).count();
+
+        let tar = if total_classes > 0 {
+            successful_classes as f64 / total_classes as f64
+        } else {
+            0.0
+        };
+
+        Ok((tar, successful_classes, total_classes))
+    }
+
     pub fn analyze_cosine_tar<P: AsRef<Path>>(
         feature_directory: P,
         lockers: &[CosineLocker],

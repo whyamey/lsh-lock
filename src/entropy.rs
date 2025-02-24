@@ -5,6 +5,7 @@ use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simsimd::BinarySimilarity;
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -103,12 +104,42 @@ impl RandomIndicesGenerator {
         file_path: &str,
         count: usize,
         size: usize,
+        dimensions: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut rng = rand::thread_rng();
 
+        println!(
+            "Generating {} lockers with {} unique positions each...",
+            count, size
+        );
+        let progress_chunk = count / 10;
+
         let random_indices: Vec<Vec<usize>> = (0..count)
-            .map(|_| (0..size).map(|_| rng.gen_range(0..1024)).collect())
-            .collect();
+            .map(|i| {
+                let mut indices = HashSet::with_capacity(size);
+                let mut attempts = 0;
+                const MAX_ATTEMPTS: usize = 1_000_000;
+
+                while indices.len() < size && attempts < MAX_ATTEMPTS {
+                    indices.insert(rng.gen_range(0..dimensions));
+                    attempts += 1;
+                }
+
+                if indices.len() < size {
+                    return Err(format!(
+                        "Failed to generate enough unique indices after {} attempts",
+                        MAX_ATTEMPTS
+                    ));
+                }
+
+                // Print progress every 10%
+                if progress_chunk > 0 && i % progress_chunk == 0 {
+                    println!("Progress: {}%", (i * 100) / count);
+                }
+
+                Ok(indices.into_iter().collect())
+            })
+            .collect::<Result<Vec<Vec<usize>>, String>>()?;
 
         let data = RandomIndices(random_indices);
         let file = File::create(file_path)?;
