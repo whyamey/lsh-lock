@@ -133,6 +133,8 @@ enum Command {
         count: usize,
         #[structopt(short = "t", long, default_value = "10")]
         tries: usize,
+        #[structopt(short = "b", long, default_value = "1")]
+        base: usize,
     },
 }
 
@@ -308,13 +310,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             templates,
             count,
             tries,
+            base,
         } => {
             let random_indices = RandomIndicesGenerator::load(&input)?;
             let selected_indices = &random_indices.0[0..count];
 
             println!("Calculating Multi-Template True Accept Rate (TAR)...");
+            println!("Using {} base templates and {} comparison templates", base, tries - base);
             let (tar, successful_classes, total_classes) =
-                TARAnalyzer::analyze_tar_multi(&templates, selected_indices, tries)?;
+                TARAnalyzer::analyze_tar_multi(&templates, selected_indices, tries, base)?;
 
             println!("\nResults:");
             println!("True Accept Rate (TAR): {:.4}", tar);

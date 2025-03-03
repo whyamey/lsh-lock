@@ -172,6 +172,7 @@ impl TARAnalyzer {
         class_path: P,
         positions: &[Vec<usize>],
         tries: usize,
+        base_count: usize,
     ) -> std::io::Result<Option<(usize, usize)>> {
         let class_path = class_path.as_ref();
         let files: Vec<_> = fs::read_dir(class_path)?
@@ -184,28 +185,37 @@ impl TARAnalyzer {
             return Ok(None);
         }
 
-        let files = files.into_iter().take(tries).collect::<Vec<_>>();
+        let mut rng = rand::thread_rng();
+        let files = files.choose_multiple(&mut rng, tries).cloned().collect::<Vec<_>>();
 
         let templates: Vec<Template> = files
             .par_iter()
             .filter_map(|file| Self::parse_binary_file(file).ok())
             .collect();
 
-        if templates.is_empty() {
+        if templates.len() < tries {
             return Ok(None);
         }
 
         let all_permutations = Self::create_permutations_batch(&templates, positions);
-
-        let base_idx = rand::thread_rng().gen_range(0..templates.len());
-        let base_permutations = &all_permutations[base_idx];
-
+        
+        let mut indices: Vec<usize> = (0..templates.len()).collect();
+        indices.shuffle(&mut rng);
+        let base_indices: Vec<usize> = indices.into_iter().take(base_count).collect();
+        
+        let base_permutations: Vec<&Vec<Vec<u8>>> = base_indices
+            .iter()
+            .map(|&idx| &all_permutations[idx])
+            .collect();
+            
         let found_match = all_permutations
             .par_iter()
             .enumerate()
-            .filter(|(idx, _)| *idx != base_idx)
+            .filter(|(idx, _)| !base_indices.contains(idx))
             .any(|(_, target_permutations)| {
-                Self::compare_permutations(base_permutations, target_permutations)
+                base_permutations.iter().any(|base_perm| {
+                    Self::compare_permutations(base_perm, target_permutations)
+                })
             });
 
         Ok(Some(if found_match { (1, 1) } else { (0, 1) }))
@@ -215,7 +225,15 @@ impl TARAnalyzer {
         feature_directory: P,
         positions: &[Vec<usize>],
         tries: usize,
+        base_count: usize,
     ) -> std::io::Result<(f64, usize, usize)> {
+        if base_count >= tries {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Base count must be less than the number of tries",
+            ));
+        }
+        
         let progress = Arc::new(AtomicUsize::new(0));
         let feature_directory = feature_directory.as_ref();
 
@@ -230,7 +248,7 @@ impl TARAnalyzer {
         let results: Vec<(usize, usize)> = class_dirs
             .par_iter()
             .filter_map(|class_path| {
-                Self::process_single_class_multi(class_path, positions, tries).unwrap_or(None)
+                Self::process_single_class_multi(class_path, positions, tries, base_count).unwrap_or(None)
             })
             .inspect(|_| {
                 let current_progress = progress.fetch_add(1, Ordering::SeqCst) + 1;
