@@ -92,7 +92,6 @@ enum Command {
         #[structopt(short, long, default_value = "60")]
         size: usize,
     },
-
     #[structopt(name = "analyze-cosine", about = "Analyze entropy using cosine LSH")]
     AnalyzeCosine {
         #[structopt(short, long)]
@@ -135,6 +134,10 @@ enum Command {
         tries: usize,
         #[structopt(short = "b", long, default_value = "1")]
         base: usize,
+        #[structopt(long = "input-selection")]
+        input_selection: Option<String>,
+        #[structopt(long = "output-selection")]
+        output_selection: Option<String>,
     },
 }
 
@@ -311,14 +314,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             count,
             tries,
             base,
+            input_selection,
+            output_selection,
         } => {
             let random_indices = RandomIndicesGenerator::load(&input)?;
             let selected_indices = &random_indices.0[0..count];
 
             println!("Calculating Multi-Template True Accept Rate (TAR)...");
-            println!("Using {} base templates and {} comparison templates", base, tries - base);
-            let (tar, successful_classes, total_classes) =
-                TARAnalyzer::analyze_tar_multi(&templates, selected_indices, tries, base)?;
+            println!(
+                "Using {} base templates and {} comparison templates",
+                base,
+                tries - base
+            );
+
+            let (tar, successful_classes, total_classes, _) = TARAnalyzer::analyze_tar_multi(
+                &templates,
+                selected_indices,
+                tries,
+                base,
+                input_selection.as_deref(),
+                output_selection.as_deref(),
+            )?;
 
             println!("\nResults:");
             println!("True Accept Rate (TAR): {:.4}", tar);
