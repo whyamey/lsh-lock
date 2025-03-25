@@ -238,21 +238,18 @@ impl SmartSampler {
     }
 
     fn generate_single_subset(
-        weights: &[f64],
+        dist: &rand::distributions::WeightedIndex<f64>,
         size: usize,
         bad_indices: &HashSet<usize>,
-        dimensions: usize,
+        pairs: &[(usize, usize)],
     ) -> Result<Vec<usize>, GenerationError> {
         let mut rng = rand::thread_rng();
-        let dist = rand::distributions::WeightedIndex::new(weights)
-            .map_err(|_| GenerationError("Failed to create weight distribution".to_string()))?;
 
         let mut positions = HashSet::new();
         let mut attempts = 0;
 
         while positions.len() < size && attempts < 1_000_000 {
             let pair_index = dist.sample(&mut rng);
-            let pairs = generate_bit_pairs(dimensions);
             if pair_index >= pairs.len() {
                 attempts += 1;
                 continue;
@@ -292,15 +289,26 @@ impl SmartSampler {
         method: SamplingMethod,
         dimensions: usize,
     ) -> Result<Vec<Vec<usize>>, Box<dyn std::error::Error>> {
-        let weights = Arc::new(self.calculate_weights(alpha, method));
-        let bad_indices = Arc::new(self.bad_indices.clone());
+        let weights = self.calculate_weights(alpha, method);
+
+        let dist = rand::distributions::WeightedIndex::new(&weights).map_err(|_| {
+            Box::new(GenerationError(
+                "Failed to create weight distribution".to_string(),
+            )) as Box<dyn std::error::Error>
+        })?;
+
+        let pairs = generate_bit_pairs(dimensions);
+        let bad_indices = &self.bad_indices;
+
+        let dist = Arc::new(dist);
+        let pairs = Arc::new(pairs);
 
         let indices: Vec<Result<Vec<usize>, GenerationError>> = (0..count)
             .into_par_iter()
             .map(|_| {
-                let weights = &weights;
-                let bad_indices = &bad_indices;
-                Self::generate_single_subset(weights, size, bad_indices, dimensions)
+                let dist = &dist;
+                let pairs = &pairs;
+                Self::generate_single_subset(dist, size, bad_indices, pairs)
             })
             .collect();
 
