@@ -163,10 +163,15 @@ impl std::fmt::Display for GenerationError {
 pub struct SmartSampler {
     confidence_entries: Vec<ConfidenceEntry>,
     bad_indices: HashSet<usize>,
+    dimensions: usize,
 }
 
 impl SmartSampler {
-    pub fn new(confidence_entries: Vec<ConfidenceEntry>, bad_indices: Option<Vec<usize>>) -> Self {
+    pub fn new(
+        confidence_entries: Vec<ConfidenceEntry>,
+        bad_indices: Option<Vec<usize>>,
+        dimensions: usize,
+    ) -> Self {
         let bad_indices = bad_indices
             .map(|indices| indices.into_iter().collect())
             .unwrap_or_default();
@@ -174,6 +179,7 @@ impl SmartSampler {
         Self {
             confidence_entries,
             bad_indices,
+            dimensions,
         }
     }
 
@@ -238,24 +244,23 @@ impl SmartSampler {
     }
 
     fn generate_single_subset(
-        dist: &rand::distributions::WeightedIndex<f64>,
+        weights: &[f64],
         size: usize,
         bad_indices: &HashSet<usize>,
-        pairs: &[(usize, usize)],
+        dimensions: usize,
     ) -> Result<Vec<usize>, GenerationError> {
         let mut rng = rand::thread_rng();
+        let dist = rand::distributions::WeightedIndex::new(weights)
+            .map_err(|_| GenerationError("Failed to create weight distribution".to_string()))?;
 
         let mut positions = HashSet::new();
         let mut attempts = 0;
 
         while positions.len() < size && attempts < 1_000_000 {
             let pair_index = dist.sample(&mut rng);
-            if pair_index >= pairs.len() {
-                attempts += 1;
-                continue;
-            }
 
-            let (i, j) = pairs[pair_index];
+            let i = pair_index / dimensions;
+            let j = pair_index % dimensions;
 
             if bad_indices.contains(&i) || bad_indices.contains(&j) {
                 attempts += 1;
@@ -287,28 +292,17 @@ impl SmartSampler {
         size: usize,
         alpha: f64,
         method: SamplingMethod,
-        dimensions: usize,
     ) -> Result<Vec<Vec<usize>>, Box<dyn std::error::Error>> {
-        let weights = self.calculate_weights(alpha, method);
-
-        let dist = rand::distributions::WeightedIndex::new(&weights).map_err(|_| {
-            Box::new(GenerationError(
-                "Failed to create weight distribution".to_string(),
-            )) as Box<dyn std::error::Error>
-        })?;
-
-        let pairs = generate_bit_pairs(dimensions);
-        let bad_indices = &self.bad_indices;
-
-        let dist = Arc::new(dist);
-        let pairs = Arc::new(pairs);
+        let weights = Arc::new(self.calculate_weights(alpha, method));
+        let bad_indices = Arc::new(self.bad_indices.clone());
+        let dimensions = self.dimensions;
 
         let indices: Vec<Result<Vec<usize>, GenerationError>> = (0..count)
             .into_par_iter()
             .map(|_| {
-                let dist = &dist;
-                let pairs = &pairs;
-                Self::generate_single_subset(dist, size, bad_indices, pairs)
+                let weights = &weights;
+                let bad_indices = &bad_indices;
+                Self::generate_single_subset(weights, size, bad_indices, dimensions)
             })
             .collect();
 
@@ -331,9 +325,9 @@ impl SmartSampler {
         dimensions: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let confidence_entries = ConfidenceReader::read_confidence_file(confidence_path)?;
-        let sampler = Self::new(confidence_entries, bad_indices);
+        let sampler = Self::new(confidence_entries, bad_indices, dimensions);
 
-        let indices = sampler.generate(count, size, alpha, method, dimensions)?;
+        let indices = sampler.generate(count, size, alpha, method)?;
         let data = SmartIndices(indices);
 
         let file = File::create(output_path)?;
