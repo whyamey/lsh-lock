@@ -163,10 +163,15 @@ impl std::fmt::Display for GenerationError {
 pub struct SmartSampler {
     confidence_entries: Vec<ConfidenceEntry>,
     bad_indices: HashSet<usize>,
+    dimensions: usize,
 }
 
 impl SmartSampler {
-    pub fn new(confidence_entries: Vec<ConfidenceEntry>, bad_indices: Option<Vec<usize>>) -> Self {
+    pub fn new(
+        confidence_entries: Vec<ConfidenceEntry>,
+        bad_indices: Option<Vec<usize>>,
+        dimensions: usize,
+    ) -> Self {
         let bad_indices = bad_indices
             .map(|indices| indices.into_iter().collect())
             .unwrap_or_default();
@@ -174,6 +179,7 @@ impl SmartSampler {
         Self {
             confidence_entries,
             bad_indices,
+            dimensions,
         }
     }
 
@@ -241,6 +247,7 @@ impl SmartSampler {
         weights: &[f64],
         size: usize,
         bad_indices: &HashSet<usize>,
+        dimensions: usize,
     ) -> Result<Vec<usize>, GenerationError> {
         let mut rng = rand::thread_rng();
         let dist = rand::distributions::WeightedIndex::new(weights)
@@ -252,8 +259,8 @@ impl SmartSampler {
         while positions.len() < size && attempts < 1_000_000 {
             let pair_index = dist.sample(&mut rng);
 
-            let i = pair_index / 1024;
-            let j = pair_index % 1024;
+            let i = pair_index / dimensions;
+            let j = pair_index % dimensions;
 
             if bad_indices.contains(&i) || bad_indices.contains(&j) {
                 attempts += 1;
@@ -288,13 +295,14 @@ impl SmartSampler {
     ) -> Result<Vec<Vec<usize>>, Box<dyn std::error::Error>> {
         let weights = Arc::new(self.calculate_weights(alpha, method));
         let bad_indices = Arc::new(self.bad_indices.clone());
+        let dimensions = self.dimensions;
 
         let indices: Vec<Result<Vec<usize>, GenerationError>> = (0..count)
             .into_par_iter()
             .map(|_| {
                 let weights = &weights;
                 let bad_indices = &bad_indices;
-                Self::generate_single_subset(weights, size, bad_indices)
+                Self::generate_single_subset(weights, size, bad_indices, dimensions)
             })
             .collect();
 
@@ -314,9 +322,10 @@ impl SmartSampler {
         alpha: f64,
         method: SamplingMethod,
         bad_indices: Option<Vec<usize>>,
+        dimensions: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let confidence_entries = ConfidenceReader::read_confidence_file(confidence_path)?;
-        let sampler = Self::new(confidence_entries, bad_indices);
+        let sampler = Self::new(confidence_entries, bad_indices, dimensions);
 
         let indices = sampler.generate(count, size, alpha, method)?;
         let data = SmartIndices(indices);
@@ -370,10 +379,10 @@ impl PairResults {
     }
 }
 
-fn generate_bit_pairs() -> Vec<(usize, usize)> {
-    let mut pairs = Vec::with_capacity(1024 * 1023 / 2);
-    for i in 0..1024 {
-        for j in (i + 1)..1024 {
+fn generate_bit_pairs(dimensions: usize) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::with_capacity(dimensions * (dimensions - 1) / 2);
+    for i in 0..dimensions {
+        for j in (i + 1)..dimensions {
             pairs.push((i, j));
         }
     }
@@ -383,13 +392,15 @@ fn generate_bit_pairs() -> Vec<(usize, usize)> {
 pub struct CorrelationAnalyzer {
     base_path: PathBuf,
     num_files: usize,
+    dimensions: usize,
 }
 
 impl CorrelationAnalyzer {
-    pub fn new<P: AsRef<Path>>(base_path: P, num_files: usize) -> Self {
+    pub fn new<P: AsRef<Path>>(base_path: P, num_files: usize, dimensions: usize) -> Self {
         Self {
             base_path: base_path.as_ref().to_path_buf(),
             num_files,
+            dimensions,
         }
     }
 
@@ -426,9 +437,11 @@ impl CorrelationAnalyzer {
     }
 
     fn process_pair_single_bits(bitstring1: &[u8], bitstring2: &[u8]) -> Vec<f64> {
+        let len = bitstring1.len().min(bitstring2.len());
         bitstring1
             .iter()
-            .zip(bitstring2.iter())
+            .take(len)
+            .zip(bitstring2.iter().take(len))
             .map(|(b1, b2)| if b1 != b2 { 1.0 } else { 0.0 })
             .collect()
     }
@@ -439,8 +452,13 @@ impl CorrelationAnalyzer {
         pairs: &[(usize, usize)],
     ) -> Vec<PairResults> {
         let mut results = vec![PairResults::default(); pairs.len()];
+        let len = bitstring1.len().min(bitstring2.len());
 
         for (idx, &(pos1, pos2)) in pairs.iter().enumerate() {
+            if pos1 >= len || pos2 >= len {
+                continue;
+            }
+
             let str1_first = bitstring1[pos1];
             let str1_second = bitstring1[pos2];
             let str2_first = bitstring2[pos1];
@@ -471,7 +489,7 @@ impl CorrelationAnalyzer {
             let bitstring2 = Self::read_bitstring(f2)?;
 
             if single_bit_results.is_empty() {
-                single_bit_results = vec![0.0; bitstring1.data.len()];
+                single_bit_results = vec![0.0; bitstring1.data.len().min(bitstring2.data.len())];
                 pair_results = vec![PairResults::default(); pairs.len()];
             }
 
@@ -513,7 +531,7 @@ impl CorrelationAnalyzer {
         mode: AnalysisMode,
     ) -> std::io::Result<()> {
         let folders = self.get_folder_paths()?;
-        let pairs = generate_bit_pairs();
+        let pairs = generate_bit_pairs(self.dimensions);
         println!("Generated {} bit pairs", pairs.len());
 
         let multi_progress = MultiProgress::new();
