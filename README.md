@@ -29,20 +29,21 @@ The tool provides several commands for different operations:
 Generate lockers without considering zeta values:
 
 ```bash
-cargo run -- random-sampling -o output.bin -c 250000 -s 80
+cargo run -- random-sampling -o output.bin -c 250000 -s 80 -d 1024
 ```
 
 Options:
 - `-o, --output`: Output file path
 - `-c, --count`: Number of samples (default: 250000)
 - `-s, --size`: Size of each sample (default: 80)
+- `-d, --dimensions`: Feature dimensions (default: 1024)
 
 ### Zeta Sampling
 
 Generate lockers with respect to zeta values:
 
 ```bash
-cargo run -- zeta-sampling -o output.bin -c confidence.txt -c 250000 -s 80 -a 1.0 --method exponent
+cargo run -- zeta-sampling -o output.bin -c confidence.txt -c 250000 -s 80 -a 1.0 --method exponent -d 1024
 ```
 
 Options:
@@ -51,6 +52,7 @@ Options:
 - `-c, --count`: Number of samples (default: 250000)
 - `-s, --size`: Size of each sample (default: 80)
 - `-a, --alpha`: Alpha parameter (default: 1.0)
+- `-d, --dimensions`: Feature dimensions (default: 1024)
 - `--method`: Sampling method (gaps/like/ratio/exponent)
 - `--bad-indices`: Comma-separated list of indices to exclude
 
@@ -59,7 +61,7 @@ Options:
 Generate confidence values by analyzing correlations:
 
 ```bash
-cargo run -- correlate -i input_dir -o output.txt -n 100 -m both
+cargo run -- correlate -i input_dir -o output.txt -n 100 -m both -d 1024
 ```
 
 Options:
@@ -67,6 +69,7 @@ Options:
 - `-o, --output`: Output file path
 - `-n, --num-files`: Number of files to analyze (default: 100)
 - `-m, --mode`: Analysis mode (single/pairs/both)
+- `-d, --dimensions`: Feature dimensions (default: 1024)
 
 ### Entropy Analysis
 
@@ -78,6 +81,32 @@ cargo run -- analyze -i indices.bin -t templates_dir -n 1000
 
 Options:
 - `-i, --input`: Input file containing indices
+- `-t, --templates`: Templates directory path
+- `-n, --count`: Number of samples to analyze (default: 1000)
+
+### Cosine LSH Generation
+
+Generate random projection LSH lockers using cosine distance:
+
+```bash
+cargo run -- cosine-generate -o output.bin -c 250000 -s 60
+```
+
+Options:
+- `-o, --output`: Output file path
+- `-c, --count`: Number of lockers to generate (default: 250000)
+- `-s, --size`: Size of each locker (default: 60)
+
+### Cosine LSH Analysis
+
+Analyze entropy using cosine LSH:
+
+```bash
+cargo run -- analyze-cosine -i input.bin -t templates_dir -n 1000
+```
+
+Options:
+- `-i, --input`: Input file containing cosine lockers
 - `-t, --templates`: Templates directory path
 - `-n, --count`: Number of samples to analyze (default: 1000)
 
@@ -93,3 +122,45 @@ Options:
 - `-i, --input`: Input file containing indices
 - `-t, --templates`: Templates directory path
 - `-n, --count`: Number of samples to analyze (default: 250000)
+
+### Cosine TAR Analysis
+
+Calculate True Accept Rate for cosine LSH lockers:
+
+```bash
+cargo run -- tar-cosine -i input.bin -t templates_dir -n 250000
+```
+
+Options:
+- `-i, --input`: Input file containing cosine lockers
+- `-t, --templates`: Templates directory path
+- `-n, --count`: Number of samples to analyze (default: 250000)
+
+### Multi-Template TAR Analysis
+
+Find TAR with multiple template matching attempts:
+
+```bash
+cargo run -- tar-multi -i indices.bin -t templates_dir -n 250000 -t 10 -b 1 --input-selection strategy --output-selection strategy
+```
+
+Options:
+- `-i, --input`: Input file containing indices
+- `-t, --templates`: Templates directory path
+- `-n, --count`: Number of samples to analyze (default: 250000)
+- `-t, --tries`: Number of template attempts (default: 10)
+- `-b, --base`: Number of base templates (default: 1)
+- `--input-selection`: Strategy for input template selection
+- `--output-selection`: Strategy for output template selection
+
+## Citation
+If you use our work, please cite:
+```
+@misc{cryptoeprint:2024/100,
+      author = {Sohaib Ahmad and Sixia Chen and Luke Demarest and Benjamin Fuller and Caleb Manicke and Alexander Russell and Amey Shukla},
+      title = {Fuzzy Extractors are Practical: Cryptographic Strength Key Derivation from the Iris},
+      howpublished = {Cryptology {ePrint} Archive, Paper 2024/100},
+      year = {2024},
+      url = {https://eprint.iacr.org/2024/100}
+}
+```
