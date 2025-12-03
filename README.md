@@ -156,11 +156,11 @@ Options:
 ## Citation
 If you use our work, please cite:
 ```
-@misc{cryptoeprint:2024/100,
-      author = {Sohaib Ahmad and Sixia Chen and Luke Demarest and Benjamin Fuller and Caleb Manicke and Alexander Russell and Amey Shukla},
-      title = {Fuzzy Extractors are Practical: Cryptographic Strength Key Derivation from the Iris},
-      howpublished = {Cryptology {ePrint} Archive, Paper 2024/100},
-      year = {2024},
-      url = {https://eprint.iacr.org/2024/100}
+@inproceedings{shukla2025fuzzy,
+  title={Fuzzy Extractors are Practical: Cryptographic Strength Key Derivation from the Iris},
+  author={Shukla, Amey and Demarest, Luke and Fuller, Benjamin and Ahmad, Sohaib and Manicke, Caleb and Russell, Alexander and Chen, Sixia},
+  booktitle={Proceedings of the 2025 ACM SIGSAC Conference on Computer and Communications Security},
+  pages={3605--3619},
+  year={2025}
 }
 ```
