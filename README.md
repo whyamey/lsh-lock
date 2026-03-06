@@ -22,7 +22,7 @@ cargo build --release
 
 ## Usage
 
-The tool provides several commands for different operations:
+You will need biometric embeddings to run this. Embeddings of synthetic irises are available in the [main repository](https://github.com/whyamey/feap). The tool provides several commands for different operations:
 
 ### Random Sampling
 
