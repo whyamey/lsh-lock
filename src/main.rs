@@ -1,5 +1,7 @@
 mod confidence;
 mod entropy;
+mod estimator_cli;
+mod estimators;
 mod tar;
 mod types;
 
@@ -25,6 +27,42 @@ struct Opt {
 
 #[derive(StructOpt)]
 enum Command {
+    #[structopt(
+        name = "entropy-suite",
+        about = "Run the existing per-subset estimators, optionally on a noise-matched null."
+    )]
+    EntropySuite(estimator_cli::SuiteArgs),
+    #[structopt(
+        name = "pair-unions",
+        about = "Generate unions using the existing overlap/random pair sampler."
+    )]
+    PairUnions(estimator_cli::PairArgs),
+    #[structopt(
+        name = "nist-entropy",
+        about = "Run official NIST stream diagnostics with one reading per identity."
+    )]
+    NistEntropy {
+        #[structopt(short = "t", long)]
+        templates: String,
+        #[structopt(short = "o", long)]
+        output: String,
+        #[structopt(long, default_value = "ea_non_iid")]
+        nist_bin: String,
+        #[structopt(long, default_value = "1000")]
+        trials: usize,
+        #[structopt(long, default_value = "67")]
+        seed: u64,
+        #[structopt(long, default_value = "1")]
+        jobs: usize,
+        #[structopt(long, default_value = "180")]
+        timeout: f64,
+        #[structopt(long)]
+        no_controls: bool,
+        #[structopt(long)]
+        keep_inputs: bool,
+        #[structopt(long, default_value = "python3")]
+        python: String,
+    },
     #[structopt(name = "random-sampling", about = "Generate lockers without zeta.")]
     RandomSampling {
         #[structopt(short, long)]
@@ -40,7 +78,7 @@ enum Command {
     ZetaSampling {
         #[structopt(short, long)]
         output: String,
-        #[structopt(short, long)]
+        #[structopt(short = "f", long)]
         confidence: String,
         #[structopt(short, long, default_value = "250000")]
         count: usize,
@@ -130,7 +168,7 @@ enum Command {
         templates: String,
         #[structopt(short = "n", long, default_value = "250000")]
         count: usize,
-        #[structopt(short = "t", long, default_value = "10")]
+        #[structopt(short = "r", long, default_value = "10")]
         tries: usize,
         #[structopt(short = "b", long, default_value = "1")]
         base: usize,
@@ -161,6 +199,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Opt::from_args();
 
     match opt.cmd {
+        Command::EntropySuite(args) => estimator_cli::suite(args)?,
+        Command::PairUnions(args) => estimator_cli::pairs(args)?,
+        Command::NistEntropy {
+            templates,
+            output,
+            nist_bin,
+            trials,
+            seed,
+            jobs,
+            timeout,
+            no_controls,
+            keep_inputs,
+            python,
+        } => {
+            // Embed the same reviewed script so the binary also works outside
+            // its original checkout. Python/NumPy and official NIST stay external.
+            let mut command = std::process::Command::new(python);
+            command.args(["-c", include_str!("../scripts/nist_entropy.py")]);
+            command.args([
+                "--templates",
+                &templates,
+                "--output",
+                &output,
+                "--nist-bin",
+                &nist_bin,
+            ]);
+            command.args(["--trials", &trials.to_string(), "--seed", &seed.to_string()]);
+            command.args([
+                "--jobs",
+                &jobs.to_string(),
+                "--timeout",
+                &timeout.to_string(),
+            ]);
+            if no_controls {
+                command.arg("--no-controls");
+            }
+            if keep_inputs {
+                command.arg("--keep-inputs");
+            }
+            let status = command.status()?;
+            if !status.success() {
+                return Err(format!(
+                    "NIST wrapper failed ({status}); inspect its output and raw logs"
+                )
+                .into());
+            }
+        }
         Command::RandomSampling {
             output,
             count,
@@ -344,4 +429,139 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn parent_estimator_command_forms_are_registered() {
+        let opt = Opt::from_iter_safe([
+            "lsh-lock",
+            "entropy-suite",
+            "-i",
+            "idx.bin",
+            "-t",
+            "data",
+            "-n",
+            "10000",
+            "--csv",
+            "suite.csv",
+        ])
+        .unwrap();
+        match opt.cmd {
+            Command::EntropySuite(args) => {
+                assert_eq!(args.count, 10000);
+                assert_eq!((args.heavy, args.samples, args.seed), (20, 100000, 67));
+                assert!(!args.synthetic_null);
+            }
+            _ => panic!("wrong command"),
+        }
+        let opt = Opt::from_iter_safe([
+            "lsh-lock",
+            "entropy-suite",
+            "-i",
+            "idx.bin",
+            "-t",
+            "data",
+            "-n",
+            "10000",
+            "--null",
+        ])
+        .unwrap();
+        assert!(matches!(opt.cmd, Command::EntropySuite(args) if args.synthetic_null));
+        let opt = Opt::from_iter_safe([
+            "lsh-lock",
+            "pair-unions",
+            "-i",
+            "idx.bin",
+            "-o",
+            "unions.bin",
+            "--pool",
+            "5000",
+            "--top",
+            "1000",
+            "--random",
+            "1000",
+        ])
+        .unwrap();
+        assert!(
+            matches!(opt.cmd, Command::PairUnions(args) if args.pool == 5000 && args.top == 1000 && args.random == 1000)
+        );
+    }
+
+    #[test]
+    fn nist_command_parses_without_colliding_with_existing_short_flags() {
+        let opt = Opt::from_iter_safe([
+            "lsh-lock",
+            "nist-entropy",
+            "-t",
+            "templates",
+            "-o",
+            "results",
+        ])
+        .expect("command parser should accept NIST with defaults");
+        match opt.cmd {
+            Command::NistEntropy {
+                trials,
+                seed,
+                jobs,
+                no_controls,
+                ..
+            } => {
+                assert_eq!((trials, seed, jobs), (1000, 67, 1));
+                assert!(!no_controls);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn zeta_confidence_and_count_have_distinct_short_flags() {
+        let opt = Opt::from_iter_safe([
+            "lsh-lock",
+            "zeta-sampling",
+            "-o",
+            "out",
+            "-f",
+            "confidence",
+            "-c",
+            "42",
+        ])
+        .expect("confidence and count must not compete for -c");
+        match opt.cmd {
+            Command::ZetaSampling {
+                confidence, count, ..
+            } => {
+                assert_eq!(confidence, "confidence");
+                assert_eq!(count, 42);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn multi_tar_templates_and_tries_have_distinct_short_flags() {
+        let opt = Opt::from_iter_safe([
+            "lsh-lock",
+            "tar-multi",
+            "-i",
+            "idx",
+            "-t",
+            "templates",
+            "-r",
+            "8",
+        ])
+        .expect("templates and tries must not compete for -t");
+        match opt.cmd {
+            Command::TARMulti {
+                templates, tries, ..
+            } => {
+                assert_eq!(templates, "templates");
+                assert_eq!(tries, 8);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
 }

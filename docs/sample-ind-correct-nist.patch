@@ -1,0 +1,70 @@
+--- a/eval/run_server.sh
++++ b/eval/run_server.sh
+@@ -16,7 +16,7 @@
+ JOBS=${JOBS:-190}; PAR=${PAR:-12}; BENCHC=${BENCHC:-48}; DRY=${DRY:-0}
+ IRIS=$D/iris_embeddings/test; FACE=$D/face_embeddings_noah_nir; FING=$D/finger_embeddings
+ FACED=$D/face_embeddings_noah_nir_dedup       # face without identity 0101 (same person as 0019)
+-GROUPS_ALL="build b1 noise entropy stl c1 c2 polar timing pair inversion joint tree"
++GROUPS_ALL="build b1 noise entropy nist stl c1 c2 polar timing pair inversion joint tree"
+ SEL=${*:-$GROUPS_ALL}
+ NRUN=0; NSKIP=0; NFAIL=0
+ 
+@@ -90,6 +90,12 @@
+   run $1_null $LSH entropy-suite -i $2 -t $3 -n $4 --null
+ }
+ g_entropy() {
++  # Fail before launching expensive jobs if the selected LSH binary lacks its estimator commands.
++  if [ "$DRY" != 1 ]; then
++    for cmd in entropy-suite pair-unions; do
++      "$LSH" "$cmd" --help >/dev/null 2>&1 || { echo "LSH binary lacks $cmd; build the reviewed entropy branch: $LSH" >&2; exit 1; }
++    done
++  fi
+   # single subsets and best-overlap unions at the C1 / C3 operating points (face on the dedup copy)
+   for spec in "iris $IRIS 70 512 suite" "face $FACED 65 512 dsuite" "fing $FING 60 1280 suite" \
+               "iris $IRIS 60 512 psuite" "face $FACED 50 512 psuite" "fing $FING 60 1280 psuite" "fing $FING 50 1280 psuite"; do
+@@ -104,6 +110,39 @@
+   done
+   i=results/entropy/idx_iris_mu70.bin; u=results/entropy/unions_iris_mu70.bin
+   suite psuite_iris_mu70 $i $IRIS 10000; suite pusuite_iris_mu70 $u $IRIS 2000
++}
++
++# ---------------------------------------------------------------- full-reading NIST diagnostics (once per export)
++# Separate full-reading tests, never folded into the per-subset estimator minimum.
++# FACED matches the existing evaluation configuration; this hook never changes source labels.
++g_nist() {
++  local nist_repo=${NIST_LSH_ROOT:-$(dirname "$(dirname "$(dirname "$LSH")")")}
++  local nist_python=${NIST_PYTHON:-python3}
++  local tag=${NIST_TAG:-full}
++  local attempt name
++  if [[ ! "$tag" =~ ^[a-zA-Z0-9._-]+$ ]]; then
++    echo "NIST_TAG may contain only letters, digits, dots, underscores and hyphens" >&2; exit 1
++  fi
++  if [ "$DRY" != 1 ] && [ ! -f "$nist_repo/scripts/nist_datasets.py" ]; then
++    echo "NIST wrapper missing; set NIST_LSH_ROOT to the reviewed LSH source checkout" >&2; exit 1
++  fi
++  if [ "$DRY" = 1 ]; then
++    name="nist_${tag}_NEW"
++    attempt="$OUT/$name"
++  else
++    # Always assess afresh: the parent's log-name cache does not validate inputs.
++    # Preserve partial results on failure, and allocate a new attempt on retry.
++    while :; do
++      attempt=$(mktemp -d "$OUT/nist_${tag}_XXXXXX") || { echo "Cannot create NIST attempt directory" >&2; exit 1; }
++      name=${attempt##*/}
++      [ ! -e "$OUT/$name.txt" ] && break
++    done
++  fi
++  run "$name" "$nist_python" "$nist_repo/scripts/nist_datasets.py" \
++      --data-root "$D" --face-templates "${NIST_FACE:-$FACED}" \
++      --output-root "$attempt/assessment" --nist-bin "${NIST_EA_NON_IID:-ea_non_iid}" \
++      --trials "${NIST_TRIALS:-1000}" --seed "${NIST_SEED:-67}" \
++      --jobs "${NIST_JOBS:-1}" --timeout "${NIST_TIMEOUT:-180}"
+ }
+ 
+ # ---------------------------------------------------------------- STL baseline: exact TAR and entropy suites
+@@ -298,3 +337,5 @@
+   echo "##### group $g"; g_$g
+ done
+ echo "=== $(date '+%F %T') done: $NRUN run, $NSKIP skipped (already complete), $NFAIL failed; results in $OUT"
++# Foreground failures (including NIST) must not look like a successful evaluation.
++[ "$NFAIL" -eq 0 ] || exit 1
