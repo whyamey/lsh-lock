@@ -1,5 +1,6 @@
 mod confidence;
 mod entropy;
+mod sets;
 mod tar;
 mod types;
 
@@ -79,6 +80,29 @@ enum Command {
         templates: String,
         #[structopt(short = "n", long, default_value = "1000")]
         count: usize,
+    },
+    #[structopt(
+        name = "analyze-sets",
+        about = "Daugman entropy of many coordinate sets on sampled impostor pairs, with split halves and an independent-bit check; writes JSON."
+    )]
+    AnalyzeSets {
+        #[structopt(short, long)]
+        input: String,
+        #[structopt(short, long)]
+        templates: String,
+        #[structopt(short, long)]
+        output: String,
+        /// Impostor pairs to sample (0 = all impostor pairs).
+        #[structopt(long, default_value = "0")]
+        pairs: usize,
+        #[structopt(long, default_value = "1")]
+        seed: u64,
+        /// Classes to exclude (for example a known duplicate identity).
+        #[structopt(long = "skip-classes", use_delimiter = true)]
+        skip_classes: Option<Vec<String>>,
+        /// File with one class per line used to fit the independent-bit prior (default: all classes).
+        #[structopt(long = "prior-classes")]
+        prior_classes: Option<String>,
     },
     #[structopt(
         name = "cosine-generate",
@@ -233,6 +257,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Average Entropy: {}, Minimum Entropy: {}",
                 avg_entropy, min_entropy
             );
+        }
+        Command::AnalyzeSets {
+            input,
+            templates,
+            output,
+            pairs,
+            seed,
+            skip_classes,
+            prior_classes,
+        } => {
+            sets::run(
+                &input,
+                &templates,
+                &output,
+                pairs,
+                seed,
+                &skip_classes.unwrap_or_default(),
+                prior_classes.as_deref(),
+            )?;
         }
         Command::CosineGenerate {
             output,

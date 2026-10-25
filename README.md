@@ -56,6 +56,22 @@ Options:
 - `--method`: Sampling method (gaps/like/ratio/exponent)
 - `--bad-indices`: Comma-separated list of indices to exclude
 
+### Entropy of Many Sets, With an Independent-Bit Check
+
+Daugman's test on arbitrary coordinate sets (subsets, unions of subsets, certified sets), written to JSON:
+
+```bash
+cargo run --release -- analyze-sets -i sets.bin -t templates_dir -o sets.json --pairs 50000 --seed 1 \
+    --skip-classes 0101 --prior-classes train_classes.txt
+```
+
+`sets.bin` uses the same bincode format as `random-sampling` output (`Vec<Vec<usize>>`). For every set the JSON
+holds the impostor mean and variance, Daugman's degrees of freedom and entropy (identical to `analyze` when
+`--pairs 0`), the entropy on the two halves of the impostor-pair sample (for a split-half noise estimate), and the
+independent-bit min-entropy `sum_j -log2 max(p_j, 1-p_j)` with `p_j` the class-balanced bit frequency on the prior
+classes. The independent-bit value ignores correlations between coordinates; it is a statistical check on
+Daugman's test, not a separate estimate of security. `--pairs 0` uses all impostor pairs.
+
 ### Correlation Analysis
 
 Generate confidence values by analyzing correlations:
