@@ -1,6 +1,8 @@
 mod confidence;
 mod entropy;
+mod estimators;
 mod sets;
+mod suite;
 mod tar;
 mod types;
 
@@ -103,6 +105,37 @@ enum Command {
         /// File with one class per line used to fit the independent-bit prior (default: all classes).
         #[structopt(long = "prior-classes")]
         prior_classes: Option<String>,
+    },
+    #[structopt(
+        name = "entropy-suite",
+        about = "Every entropy estimator (Daugman, per-identity lower tail, beta-binomial, NIST MCV, spectral, Chow-Liu, guesswork) on many coordinate sets; writes JSON."
+    )]
+    EntropySuite {
+        #[structopt(short, long)]
+        input: String,
+        #[structopt(short, long)]
+        templates: String,
+        #[structopt(short, long)]
+        output: String,
+        /// Classes to exclude (for example a known duplicate identity).
+        #[structopt(long = "skip-classes", use_delimiter = true)]
+        skip_classes: Option<Vec<String>>,
+        /// File with one class per line on which model-based estimators are fitted (default: a seeded split).
+        #[structopt(long = "train-classes")]
+        train_classes: Option<String>,
+        #[structopt(long = "train-frac", default_value = "0.5")]
+        train_frac: f64,
+        /// Run the model-based estimators on this many sets with the lowest Daugman value.
+        #[structopt(long, default_value = "0")]
+        heavy: usize,
+        /// Model samples per Monte Carlo rank estimate.
+        #[structopt(long, default_value = "2000")]
+        samples: usize,
+        #[structopt(long, default_value = "1")]
+        seed: u64,
+        /// Also run every estimator on a full-entropy dataset of the same shape.
+        #[structopt(long)]
+        null: bool,
     },
     #[structopt(
         name = "cosine-generate",
@@ -275,6 +308,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 seed,
                 &skip_classes.unwrap_or_default(),
                 prior_classes.as_deref(),
+            )?;
+        }
+        Command::EntropySuite {
+            input,
+            templates,
+            output,
+            skip_classes,
+            train_classes,
+            train_frac,
+            heavy,
+            samples,
+            seed,
+            null,
+        } => {
+            suite::run(
+                &input,
+                &templates,
+                &output,
+                &skip_classes.unwrap_or_default(),
+                train_classes.as_deref(),
+                train_frac,
+                heavy,
+                samples,
+                seed,
+                null,
             )?;
         }
         Command::CosineGenerate {
